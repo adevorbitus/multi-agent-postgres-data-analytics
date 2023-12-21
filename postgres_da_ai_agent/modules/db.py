@@ -59,17 +59,41 @@ class PostgresManager:
         Generate the 'create' definition for a table
         """
 
+        # get_def_stmt = """
+        # SELECT pg_class.relname as tablename,
+        #     pg_attribute.attnum,
+        #     pg_attribute.attname,
+        #     format_type(atttypid, atttypmod)
+        # FROM pg_class
+        # JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
+        # JOIN pg_attribute ON pg_attribute.attrelid = pg_class.oid
+        # WHERE pg_attribute.attnum > 0
+        #     AND pg_class.relname = %s
+        #     AND pg_namespace.nspname = 'public'  -- Assuming you're interested in public schema
+        # """
+
         get_def_stmt = """
-        SELECT pg_class.relname as tablename,
-            pg_attribute.attnum,
-            pg_attribute.attname,
-            format_type(atttypid, atttypmod)
-        FROM pg_class
-        JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
-        JOIN pg_attribute ON pg_attribute.attrelid = pg_class.oid
-        WHERE pg_attribute.attnum > 0
-            AND pg_class.relname = %s
-            AND pg_namespace.nspname = 'public'  -- Assuming you're interested in public schema
+        SELECT
+            ft.foreign_table_schema as schema_name,
+            ft.foreign_table_name as table_name,
+            a.attname as column_name,
+            format_type(a.atttypid, a.atttypmod) as column_type,
+            d.description as column_description
+        FROM
+            information_schema.foreign_tables ft
+        JOIN
+            pg_foreign_table pft ON ft.foreign_table_name = pft.ftrelid::regclass::text
+        JOIN
+            pg_attribute a ON a.attrelid = pft.ftrelid
+        LEFT JOIN
+            pg_description d ON a.attrelid = d.objoid AND a.attnum = d.objsubid
+        WHERE
+            ft.foreign_table_schema = 'akeyless'
+            AND a.attnum > 0
+        ORDER BY
+            ft.foreign_table_schema,
+            ft.foreign_table_name,
+            a.attnum;
         """
         self.cur.execute(get_def_stmt, (table_name,))
         rows = self.cur.fetchall()
@@ -83,8 +107,11 @@ class PostgresManager:
         """
         Get all table names in the database
         """
+        # get_all_tables_stmt = (
+        #     "SELECT tablename FROM pg_tables WHERE schemaname = 'public';"
+        # )
         get_all_tables_stmt = (
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public';"
+            "SELECT foreign_table_name FROM information_schema.foreign_tables WHERE foreign_table_schema = 'akeyless';"
         )
         self.cur.execute(get_all_tables_stmt)
         return [row[0] for row in self.cur.fetchall()]
@@ -117,16 +144,46 @@ class PostgresManager:
         related_tables_dict = {}
 
         for table in table_list:
-            # Query to fetch tables that have foreign keys referencing the given table
+            # # Query to fetch tables that have foreign keys referencing the given table
+            # self.cur.execute(
+            #     """
+            #     SELECT 
+            #         a.relname AS table_name
+            #     FROM 
+            #         pg_constraint con 
+            #         JOIN pg_class a ON a.oid = con.conrelid 
+            #     WHERE 
+            #         confrelid = (SELECT oid FROM pg_class WHERE relname = %s)
+            #     LIMIT %s;
+            #     """,
+            #     (table, n),
+            # )
+
+
+            # Query to fetch foreign tables that have foreign keys referencing the given foreign table
             self.cur.execute(
                 """
                 SELECT 
-                    a.relname AS table_name
+                    ft.foreign_table_name AS table_name
                 FROM 
-                    pg_constraint con 
-                    JOIN pg_class a ON a.oid = con.conrelid 
+                    information_schema.foreign_table_constraints AS ftc
+                    JOIN information_schema.foreign_tables AS ft 
+                        ON ft.foreign_table_name = ftc.foreign_table_name
+                        AND ft.foreign_table_schema = ftc.foreign_table_schema
                 WHERE 
-                    confrelid = (SELECT oid FROM pg_class WHERE relname = %s)
+                    ftc.unique_constraint_schema = 'akeyless'
+                    AND ftc.unique_constraint_name = (
+                        SELECT 
+                            tc.constraint_name 
+                        FROM 
+                            information_schema.table_constraints AS tc
+                            JOIN information_schema.constraint_column_usage AS ccu 
+                                ON ccu.constraint_name = tc.constraint_name
+                        WHERE 
+                            tc.constraint_schema = 'akeyless'
+                            AND tc.table_name = %s
+                            AND tc.constraint_type = 'FOREIGN KEY'
+                    )
                 LIMIT %s;
                 """,
                 (table, n),
@@ -134,20 +191,41 @@ class PostgresManager:
 
             related_tables = [row[0] for row in self.cur.fetchall()]
 
-            # Query to fetch tables that the given table references
+            # # Query to fetch tables that the given table references
+            # self.cur.execute(
+            #     """
+            #     SELECT 
+            #         a.relname AS referenced_table_name
+            #     FROM 
+            #         pg_constraint con 
+            #         JOIN pg_class a ON a.oid = con.confrelid 
+            #     WHERE 
+            #         conrelid = (SELECT oid FROM pg_class WHERE relname = %s)
+            #     LIMIT %s;
+            #     """,
+            #     (table, n),
+            # )
+
+
+            # Query to fetch foreign tables that the given foreign table references
             self.cur.execute(
                 """
                 SELECT 
-                    a.relname AS referenced_table_name
+                    ft.foreign_table_name AS referenced_table_name
                 FROM 
-                    pg_constraint con 
-                    JOIN pg_class a ON a.oid = con.confrelid 
+                    information_schema.foreign_table_constraints AS ftc
+                    JOIN information_schema.foreign_tables AS ft 
+                        ON ft.foreign_table_name = ftc.referenced_table_name
+                        AND ft.foreign_table_schema = ftc.referenced_table_schema
                 WHERE 
-                    conrelid = (SELECT oid FROM pg_class WHERE relname = %s)
+                    ftc.foreign_table_schema = 'akeyless'
+                    AND ftc.foreign_table_name = %s
+                    AND ftc.constraint_type = 'FOREIGN KEY'
                 LIMIT %s;
                 """,
                 (table, n),
             )
+
 
             related_tables += [row[0] for row in self.cur.fetchall()]
 
